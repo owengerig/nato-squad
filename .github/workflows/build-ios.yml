@@ -1,0 +1,323 @@
+# Builds the iPhone / iPad app (.ipa) in the cloud and publishes it as a GitHub Release.
+#
+#   1. "Export Xcode project" (Linux, GameCI): Unity builds the iOS player into an Xcode project.
+#   2. "Build IPA" (macOS, Xcode): archives the project and exports an .ipa.
+#      - With the signing secrets below: a signed .ipa (App Store / TestFlight, or Ad Hoc for registered devices),
+#        and optionally uploaded straight to TestFlight.
+#      - Without them: an UNSIGNED .ipa. It can't be installed as is; sideloading tools (AltStore, Sideloadly) re-sign
+#        it with your own Apple ID. Useful to check that the iOS build works before you have an Apple Developer account.
+#
+# One-time setup (repo Settings → Secrets and variables → Actions → New repository secret):
+#   UNITY_LICENSE, UNITY_EMAIL, UNITY_PASSWORD      same as the Android workflow
+#   Signing (optional, needs an Apple Developer account, $99/year):
+#     APPLE_TEAM_ID                     10-character team ID (developer.apple.com → Membership)
+#     IOS_CERTIFICATE_P12_BASE64        "Apple Distribution" certificate + private key exported from Keychain as .p12, base64
+#     IOS_CERTIFICATE_PASSWORD          the password you gave the .p12
+#     IOS_PROVISIONING_PROFILE_BASE64   App Store (or Ad Hoc) provisioning profile for com.ogsoftware.natosquad, base64
+#   TestFlight upload (optional):
+#     APP_STORE_CONNECT_KEY_ID, APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_P8 (contents of the AuthKey_XXXX.p8 file)
+#   base64 on a Mac:  base64 -i file.p12 | pbcopy      on Windows (PowerShell):  [Convert]::ToBase64String([IO.File]::ReadAllBytes("file.p12")) | Set-Clipboard
+#
+# Like the Android workflow, it skips the build when nothing in Assets/, Packages/ or ProjectSettings/ changed since the
+# latest iOS release, unless "Build even if nothing changed" is ticked.
+
+name: Build iOS IPA
+
+# manual only: Actions tab → "Build iOS IPA" → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      export_method:
+        description: Signed export type (ignored when there are no signing secrets)
+        type: choice
+        options: [app-store-connect, release-testing]
+        default: app-store-connect
+      upload_testflight:
+        description: Upload the signed IPA to TestFlight (needs the App Store Connect API key secrets)
+        type: boolean
+        default: false
+      force:
+        description: Build even if nothing changed since the latest release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # to create the release
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check for changes
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Checkout repository (with history and tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare with the latest release that has an IPA
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "Build forced."; echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          LAST=""
+          for TAG in $(gh release list --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' 2>/dev/null || true); do
+            if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -q '\.ipa$'; then LAST="$TAG"; break; fi
+          done
+          if [ -z "$LAST" ] || ! git rev-parse -q --verify "refs/tags/$LAST" > /dev/null; then
+            echo "No earlier iOS release found: building."; echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          BUILT=$(git rev-list -n 1 "refs/tags/$LAST")
+          CHANGED=$(git diff --name-only "$BUILT" "$GITHUB_SHA" -- Assets Packages ProjectSettings)
+          if [ -z "$CHANGED" ]; then
+            echo "::notice title=No iOS build needed::Nothing in Assets/, Packages/ or ProjectSettings/ changed since $LAST."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changed since $LAST:"; echo "$CHANGED" | head -50
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  exportXcode:
+    name: Export Xcode project (Unity)
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      code: ${{ steps.version.outputs.code }}
+      tag: ${{ steps.version.outputs.tag }}
+      signed: ${{ steps.signing.outputs.signed }}
+      profile_uuid: ${{ steps.signing.outputs.profile_uuid }}
+      profile_type: ${{ steps.signing.outputs.profile_type }}
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^  bundleVersion:' ProjectSettings/ProjectSettings.asset | awk '{print $2}')
+          CODE=$(grep -m1 'AndroidBundleVersionCode:' ProjectSettings/ProjectSettings.asset | awk '{print $2}')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION-build$CODE" >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION, build $CODE"
+
+      # Read the provisioning profile's UUID so Unity writes manual signing into the Xcode project
+      # (Editor/CiIosSigning.cs picks up -iosTeamId / -iosProfileId / -iosProfileType).
+      - name: Read signing setup
+        id: signing
+        env:
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          CERT: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+        run: |
+          if [ -z "$TEAM" ] || [ -z "$PROFILE" ] || [ -z "$CERT" ]; then
+            echo "::warning::iOS signing secrets not set: building an UNSIGNED .ipa (see the comments at the top of this workflow)."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s' "$PROFILE" | base64 -d > profile.mobileprovision
+          openssl smime -inform der -verify -noverify -in profile.mobileprovision 2>/dev/null > profile.plist
+          UUID=$(grep -A1 '<key>UUID</key>' profile.plist | tail -1 | sed -E 's/.*<string>(.*)<\/string>.*/\1/')
+          TYPE=distribution
+          if grep -q '<key>get-task-allow</key>' profile.plist && grep -A1 '<key>get-task-allow</key>' profile.plist | grep -q '<true/>'; then TYPE=development; fi
+          rm -f profile.mobileprovision profile.plist
+          [ -n "$UUID" ] || { echo "::error::Couldn't read the provisioning profile's UUID"; exit 1; }
+          echo "Profile $UUID ($TYPE), team $TEAM"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "profile_uuid=$UUID" >> "$GITHUB_OUTPUT"
+          echo "profile_type=$TYPE" >> "$GITHUB_OUTPUT"
+          echo "args=-iosTeamId $TEAM -iosProfileId $UUID -iosProfileType $TYPE" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Unity Library
+        uses: actions/cache/restore@v4
+        with:
+          path: Library
+          key: Library-iOS-${{ github.run_id }}
+          restore-keys: |
+            Library-iOS-
+
+      - name: Build with Unity
+        id: build
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: iOS
+          buildName: NATO-Squad
+          versioning: Custom
+          version: ${{ steps.version.outputs.version }}
+          customParameters: ${{ steps.signing.outputs.args }}
+
+      - name: Save Unity Library
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: Library
+          key: Library-iOS-${{ github.run_id }}
+
+      # tar keeps file permissions (Xcode build scripts must stay executable)
+      - name: Pack the Xcode project
+        run: |
+          DIR=$(dirname "$(find build -maxdepth 4 -name 'Unity-iPhone.xcodeproj' -type d | head -n1)")
+          [ -n "$DIR" ] && [ "$DIR" != "." ] || { echo "::error::No Xcode project was produced"; exit 1; }
+          echo "Xcode project in $DIR"
+          tar -czf xcode-project.tar.gz -C "$DIR" .
+          ls -la xcode-project.tar.gz
+
+      - name: Upload Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-project
+          path: xcode-project.tar.gz
+          retention-days: 3
+
+  buildIpa:
+    name: Build IPA (Xcode)
+    needs: exportXcode
+    runs-on: macos-15
+    env:
+      SIGNED: ${{ needs.exportXcode.outputs.signed }}
+      TAG: ${{ needs.exportXcode.outputs.tag }}
+    steps:
+      - name: Download Xcode project
+        uses: actions/download-artifact@v4
+        with:
+          name: xcode-project
+
+      - name: Unpack
+        run: |
+          mkdir xcode && tar -xzf xcode-project.tar.gz -C xcode
+          ls xcode
+          xcodebuild -version
+
+      - name: Install certificate and provisioning profile
+        if: env.SIGNED == 'true'
+        env:
+          CERT: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          CERT_PASS: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          UUID: ${{ needs.exportXcode.outputs.profile_uuid }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASS=$(openssl rand -hex 16)
+          printf '%s' "$CERT" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASS" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASS" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          printf '%s' "$PROFILE" | base64 -d > "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Archive
+        working-directory: xcode
+        run: |
+          set -o pipefail
+          EXTRA=""
+          if [ "$SIGNED" != "true" ]; then EXTRA="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="; fi
+          xcodebuild archive \
+            -project Unity-iPhone.xcodeproj \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$GITHUB_WORKSPACE/NATO-Squad.xcarchive" \
+            $EXTRA | tail -n 200
+
+      - name: Export signed IPA
+        if: env.SIGNED == 'true'
+        env:
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          UUID: ${{ needs.exportXcode.outputs.profile_uuid }}
+          METHOD: ${{ inputs.export_method }}
+        run: |
+          cat > ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>$METHOD</string>
+            <key>teamID</key><string>$TEAM</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict><key>com.ogsoftware.natosquad</key><string>$UUID</string></dict>
+            <key>uploadSymbols</key><true/>
+            <key>stripSwiftSymbols</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath NATO-Squad.xcarchive -exportPath export -exportOptionsPlist ExportOptions.plist
+          IPA=$(find export -name '*.ipa' | head -n1)
+          [ -n "$IPA" ] || { echo "::error::No .ipa was exported"; exit 1; }
+          mv "$IPA" "NATO-Squad-$TAG.ipa"
+
+      - name: Package unsigned IPA
+        if: env.SIGNED != 'true'
+        run: |
+          APP=$(find NATO-Squad.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -n1)
+          [ -n "$APP" ] || { echo "::error::No .app in the archive"; exit 1; }
+          mkdir -p Payload && cp -R "$APP" Payload/
+          zip -qry "NATO-Squad-$TAG-unsigned.ipa" Payload
+          ls -la *.ipa
+
+      - name: Upload to TestFlight
+        if: env.SIGNED == 'true' && inputs.upload_testflight && inputs.export_method == 'app-store-connect'
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+        run: |
+          [ -n "$KEY_ID" ] && [ -n "$ISSUER" ] && [ -n "$KEY_P8" ] || { echo "::error::App Store Connect API key secrets are missing"; exit 1; }
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          printf '%s' "$KEY_P8" > "$HOME/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8"
+          xcrun altool --upload-app -f "NATO-Squad-$TAG.ipa" -t ios --apiKey "$KEY_ID" --apiIssuer "$ISSUER"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NATO-Squad-iOS-${{ env.TAG }}
+          path: "*.ipa"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.exportXcode.outputs.version }}
+          CODE: ${{ needs.exportXcode.outputs.code }}
+        run: |
+          IPA=$(ls *.ipa | head -n1)
+          NOTES="NATO Squad v$VERSION (build $CODE).
+          Built from ${GITHUB_SHA::7} by run #${{ github.run_number }}.
+
+          iOS: $([ "$SIGNED" = "true" ] && echo "signed .ipa (${{ inputs.export_method }})." || echo "UNSIGNED .ipa: re-sign it with a sideloading tool, or add the signing secrets for a signed build.")
+          Android: see the 'Build Android APK' workflow."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$IPA" --clobber
+          else
+            gh release create "$TAG" "$IPA" --title "NATO Squad v$VERSION (build $CODE)" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi
