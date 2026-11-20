@@ -110,6 +110,16 @@ granted twice.
   Games, backed up to its saved games. See [`PRIVACY.md`](PRIVACY.md). The iOS
   privacy manifest is `Assets/Plugins/iOS/PrivacyInfo.xcprivacy`.
 
+## Render pipeline (URP 2D)
+- The game uses the Universal Render Pipeline with the 2D Renderer, the same setup as 2D Clash. Unity 6.5+
+  deprecates the Built-in Render Pipeline (the warning Unity Hub showed).
+- Everything is drawn with SpriteRenderers and UI, with no custom shaders, lights or post-processing, so nothing else
+  needed converting. Sprites without their own material get URP's default sprite material automatically.
+- Settings: `Assets/Settings/Rendering/RenderPipeline.asset` (uses `Renderer2D.asset`).
+  `Assets/Settings/Rendering/Editor/URPSetup.cs` assigns it in Graphics settings and every Quality level when the
+  project opens (and installs URP if the package is missing). Check with **OG Software > Render Pipeline > Check
+  URP Setup**. Commit the changed `ProjectSettings/` files after the first open.
+
 ## Versioning
 The app is at **0.1.0, build 2** (reset to 0.1.0 with the other OG Software apps; the build number kept rising). Use **NATO Squad → Version → Bump Patch / Minor / Major / Build Only**. These
 commands keep Player Settings, the Android versionCode, the iOS build number and `GameVersion.Build` in step. Commit
