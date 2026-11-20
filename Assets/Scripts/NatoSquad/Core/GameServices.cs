@@ -76,7 +76,8 @@ namespace NatoSquad
         {
             if (GameManager.I == null || GameManager.I.Save == null) return;
             Evaluate();
-            OGCloudSave.MarkDirty();
+            // while a cloud copy waits to be loaded, this device's older save must not be uploaded over it
+            if (pendingRestore == null) OGCloudSave.MarkDirty();
         }
 
         /// <summary>Works out every achievement and leaderboard from the save (safe to repeat).</summary>
