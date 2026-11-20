@@ -58,6 +58,7 @@ namespace NatoSquad
 
         public override void Build()
         {
+            GameServices.ApplyPendingRestore(); // a cloud save that arrived during a sortie is loaded here
             G.Audio.PlayMusic(GameAudio.Track.Menu);
 
             // scenery
@@ -104,8 +105,14 @@ namespace NatoSquad
             var gold = UI.Label(goldBox.transform, UI.Gold(G.Save.gold), 40, Pal.Gold, TextAnchor.MiddleRight, FontStyle.Bold);
             UI.Stretch(gold.rectTransform, 76, 0, 20, 0);
 
-            // small credit + version at the bottom of the main screen
-            var credit = UI.Label(Root, "Creator " + Links.Creator + "   " + GameVersion.Label, 24, new Color(1, 1, 1, 0.75f), TextAnchor.LowerLeft);
+            // Game Center / Play Games, bottom right (signs in first if needed)
+            var ach = UI.Button(Root, "ACHIEVEMENTS", 26, Pal.PanelLight, () => OGSoftware.Platform.OGPlatform.ShowAchievements());
+            UI.Place((RectTransform)ach.transform, new Vector2(1, 0), new Vector2(300, 76), new Vector2(-344, 24), new Vector2(1, 0));
+            var ranks = UI.Button(Root, "LEADERBOARDS", 26, Pal.PanelLight, () => OGSoftware.Platform.OGPlatform.ShowLeaderboard());
+            UI.Place((RectTransform)ranks.transform, new Vector2(1, 0), new Vector2(300, 76), new Vector2(-24, 24), new Vector2(1, 0));
+
+            // credit + version, bottom left: "Created by OG Software v0.1.0" (the same line in every OG Software app)
+            var credit = UI.Label(Root, GameVersion.Credit, 24, new Color(1, 1, 1, 0.75f), TextAnchor.LowerLeft);
             UI.Place(credit.rectTransform, new Vector2(0, 0), new Vector2(800, 40), new Vector2(24, 14));
             UI.AddShadow(credit, 2);
         }
@@ -329,17 +336,20 @@ namespace NatoSquad
             UI.Place((RectTransform)restore.transform, new Vector2(1, 0.5f), new Vector2(410, 100), Vector2.zero, new Vector2(1, 0.5f));
 
             var reset = UI.Button(panel.transform, "RESET PROGRESS", 30, new Color(0.45f, 0.12f, 0.12f), () =>
-                G.Dialog("Reset all progress?", "This deletes your gold, upgrades, modules and mission stars on this device. Purchases of Double Gold Pay can be restored.", "RESET", () =>
+                G.Dialog("Reset all progress?", "This deletes your gold, upgrades, modules and mission stars, here and in your " + OGSoftware.Platform.OGPlatform.ServiceName + " backup. Purchases of Double Gold Pay can be restored.", "RESET", () =>
                 {
+                    long revision = G.Save.revision; // keep counting, so the reset replaces the cloud copy instead of it coming back
                     SaveSystem.Delete();
                     G.Save = SaveSystem.Load();
+                    G.Save.revision = revision;
                     G.SaveGame();
                     G.Toast("Progress reset");
                     G.Show<MainMenuScreen>();
                 }, "CANCEL"));
             UI.Place((RectTransform)reset.transform, new Vector2(0.5f, 0), new Vector2(420, 90), new Vector2(0, 40), new Vector2(0.5f, 0));
 
-            var info = UI.Label(panel.transform, "NATO Squad " + GameVersion.LongLabel + "  ·  Creator " + Links.Creator, 24, Pal.TextDim, TextAnchor.LowerRight);
+            string who = OGSoftware.Platform.OGPlatform.IsSignedIn ? OGSoftware.Platform.OGPlatform.ServiceName + ": " + OGSoftware.Platform.OGPlatform.PlayerName + "  ·  " : "";
+            var info = UI.Label(panel.transform, who + "NATO Squad " + GameVersion.LongLabel + "  ·  Created by " + Links.Creator, 24, Pal.TextDim, TextAnchor.LowerRight);
             UI.Stretch(info.rectTransform, 20, 14, 24, 0);
         }
 

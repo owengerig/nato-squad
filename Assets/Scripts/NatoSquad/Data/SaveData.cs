@@ -41,6 +41,7 @@ namespace NatoSquad
         public string dealDay = "";
         public bool dealBought;
         public bool tutorialSeen;
+        public long revision;                              // +1 on every save; picks between this device's and the cloud's copy (GameServices)
 
         public int Stars(int mission) => mission >= 0 && mission < missionStars.Count ? missionStars[mission] : 0;
         public bool Cleared(int mission) => Stars(mission) > 0;
@@ -104,12 +105,19 @@ namespace NatoSquad
             {
                 if (File.Exists(SavePath))
                 {
-                    var d = JsonUtility.FromJson<SaveData>(File.ReadAllText(SavePath));
-                    if (d != null) return Fix(d);
+                    var d = FromJson(File.ReadAllText(SavePath));
+                    if (d != null) return d;
                 }
             }
             catch (Exception e) { Debug.LogWarning("[NATO Squad] Couldn't read the save: " + e.Message); }
             return Fix(new SaveData());
+        }
+
+        /// <summary>Reads a save (from the file or from the cloud) and fills in anything missing. Null if it isn't one.</summary>
+        public static SaveData FromJson(string json)
+        {
+            var d = JsonUtility.FromJson<SaveData>(json);
+            return d != null ? Fix(d) : null;
         }
 
         static SaveData Fix(SaveData d)
@@ -126,8 +134,17 @@ namespace NatoSquad
             return d;
         }
 
-        /// <summary>Writes the save atomically. Returns false if it could not be written.</summary>
+        /// <summary>Saves (a new revision) and tells GameServices. Returns false if it could not be written.</summary>
         public static bool Save(SaveData d)
+        {
+            d.revision++;
+            bool ok = Write(d);
+            GameServices.OnSaved();
+            return ok;
+        }
+
+        /// <summary>Writes the save atomically, as it is. Returns false if it could not be written.</summary>
+        public static bool Write(SaveData d)
         {
             try
             {

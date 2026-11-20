@@ -1,6 +1,6 @@
 # NATO Squad
 
-A side-scrolling jet shooter for iOS and Android, built in Unity 6. Created by **OG Software**. Version **0.0.1**.
+A side-scrolling jet shooter for iOS and Android, built in Unity 6. Created by **OG Software**. Version **0.1.0**.
 
 It plays like the classic 16-bit mercenary-squadron shooters. You fly left to right, your guns fire automatically, and
 you fight air and ground enemies until a boss shows up at the end of each operation. Missions pay gold, and you spend
@@ -88,15 +88,30 @@ Prices come from the stores. The amounts shown in the code (`$0.99` and so on) a
 can't be reached. The game saves before it confirms a purchase, and it records transaction IDs so a purchase is never
 granted twice.
 
+## Game Center / Google Play Games
+- Shared OG Software code in `Assets/OGPlatform` (+ native bridges in `Assets/Plugins/iOS/OGPlatform` and
+  `Assets/Plugins/Android/OGPlatform`); the game's part is `Assets/Scripts/NatoSquad/Core/GameServices.cs`.
+- 13 achievements and 2 leaderboards (enemies destroyed, lifetime gold), worked out from the save after every save,
+  so progress made while signed out is sent at the next sign-in.
+- Cloud save: the whole save. `SaveData.revision` counts saves; on sign-in the copy saved more often wins and a fresh
+  install always takes the cloud copy. A restore that arrives during a sortie waits for the main menu. Double Gold
+  Pay and granted purchase IDs on the device are kept when a cloud copy is loaded.
+- Xcode (GameKit, Game Center + iCloud) and Gradle (Play Games library, App ID) are set up automatically at build
+  time by `Assets/OGPlatform/Editor/OGPlatformBuild.cs`.
+- Store setup (IDs, names, descriptions, points): [`GAME_SERVICES.md`](GAME_SERVICES.md).
+
 ## Main menu, privacy and support
-- The bottom-left of the main menu shows `Creator OG Software   v0.0.1`.
+- The bottom-left of the main menu shows `Created by OG Software v0.1.0` (the same line in every OG Software app).
+- The bottom-right has **ACHIEVEMENTS** and **LEADERBOARDS** (Game Center / Google Play Games; they sign in first if
+  needed).
 - **Settings** has links to the **Privacy Policy** (https://sites.google.com/view/og-software/privacy-policy) and
   **Support** (https://sites.google.com/view/og-software/support). The same URLs are in `Core/GameVersion.cs` (`Links`).
-- The game collects no personal data. Progress is saved only on the device. See [`PRIVACY.md`](PRIVACY.md). The iOS
+- The game collects no personal data. Progress is saved on the device and, when signed in to Game Center / Play
+  Games, backed up to its saved games. See [`PRIVACY.md`](PRIVACY.md). The iOS
   privacy manifest is `Assets/Plugins/iOS/PrivacyInfo.xcprivacy`.
 
 ## Versioning
-The app starts at **0.0.1, build 1**. Use **NATO Squad → Version → Bump Patch / Minor / Major / Build Only**. These
+The app is at **0.1.0, build 2** (reset to 0.1.0 with the other OG Software apps; the build number kept rising). Use **NATO Squad → Version → Bump Patch / Minor / Major / Build Only**. These
 commands keep Player Settings, the Android versionCode, the iOS build number and `GameVersion.Build` in step. Commit
 `ProjectSettings/ProjectSettings.asset` and `GameVersion.cs` afterwards.
 

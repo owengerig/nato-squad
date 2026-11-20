@@ -73,6 +73,10 @@ namespace NatoSquad
             Store = gameObject.AddComponent<IAPManager>();
             Store.Init(this);
 
+            // Game Center / Google Play Games: sign-in, achievements, leaderboards, cloud copy of the save
+            try { GameServices.Init(); }
+            catch (Exception e) { Debug.LogError("[NATO Squad] game services: " + e); }
+
             Show<MainMenuScreen>();
         }
 
